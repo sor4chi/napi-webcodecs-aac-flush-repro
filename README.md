@@ -1,35 +1,34 @@
 # @napi-rs/webcodecs AudioEncoder: `flush()` resolves before all chunks are delivered
 
-With `@napi-rs/webcodecs` 1.4.2, `AudioEncoder.flush()` (AAC) resolves while most encoded chunks have not yet reached the `output` callback. A muxer that finalizes right after `await flush()` — mediabunny does — writes only the chunks that arrived so far.
+With `@napi-rs/webcodecs` 1.4.2, `AudioEncoder.flush()` (AAC) resolves while most encoded chunks have not yet reached the `output` callback. A muxer that finalizes right after `await flush()` (mediabunny does) writes only the chunks that arrived so far.
 
-![chunk timestamp by arrival order](./arrival-order.png)
+The same input, a 1 kHz beep every second for 96 s, is encoded to AAC/MP4 through mediabunny in Chromium and in Node with `@napi-rs/webcodecs`. The Node file stops after about 21 s:
 
-96 s of synthetic stereo noise at 48 kHz:
+![waveform comparison](./waveform.png)
 
-| | value |
-| --- | --- |
-| chunks delivered in total | 4501 |
-| chunks delivered when `flush()` resolved | 1001 |
-| packets in the resulting MP4 | 1001 (≈ 21.3 s of audio) |
+| | Chromium | @napi-rs/webcodecs 1.4.2 |
+| --- | --- | --- |
+| packets in the MP4 | 4503 | 1001 |
+| chunks delivered when `flush()` resolved | — | 1001 of 4501 |
 
-Two more defects are visible in the same run:
+Two more defects show up in the same encoder. The final chunks (`timestamp` `95978666`) are delivered right before `flush()` resolves, ahead of ~3500 earlier chunks. They also share one `timestamp`, and their `duration` is `1024`, a sample count where microseconds are expected.
 
-- The final chunks (timestamp ≈ 95.98 s) are delivered right before `flush()` resolves, ahead of ~3500 earlier chunks, so the output order is not monotonic.
-- The last two chunks share the same `timestamp` (95978666), and their `duration` is `1024`: a sample count where microseconds are expected (other chunks have `21333`).
+The third lane is the same Node export built from [a branch with a fix](https://github.com/sor4chi/webcodecs-node/tree/fix/audio-encoder-flush-delivery).
 
 ## Reproduce
 
 ```sh
 npm install
-node repro.mjs 96   # encodes 96 s via mediabunny, writes result.json
-node plot.mjs       # draws arrival-order.png from result.json
+node export-chromium.mjs 96            # chromium.mp4 (set CHROMIUM_PATH to use a specific Chromium)
+node export-node.mjs 96 node.mp4       # node.mp4, prints delivery counts
+node waveform.mjs                      # waveform.png (needs ffmpeg)
 ```
 
-`repro.mjs` wraps the encoder's `output` callback to record the arrival order and the number of chunks received when `flush()` resolves. Then it reads the MP4 back with mediabunny and counts the packets.
+To add the fixed lane, build the fix branch and run `WEBCODECS_PATH=<path to its index.js> node export-node.mjs 96 node-patched.mp4`.
 
-Calling `encode()` in a tight loop without yielding to the event loop does not reproduce the truncation (all chunks arrive before `flush()` resolves). The last-chunk timestamp/duration defect appears either way.
+`export-node.mjs` wraps the encoder's `output` callback to count chunks and records how many had arrived when `flush()` resolved. mediabunny waits for `dequeue` whenever `encodeQueueSize >= 4`, so `encode()` calls are interleaved with yields to the event loop. Calling `encode()` in a tight loop without yielding does not reproduce the truncation.
 
 ## Environment
 
 - `@napi-rs/webcodecs` 1.4.2, mediabunny 1.61.3
-- Node.js 24.18.0, macOS (darwin-arm64)
+- Chromium 153 (headless, Playwright), Node.js 24.18.0, ffmpeg 8, macOS (darwin-arm64)
